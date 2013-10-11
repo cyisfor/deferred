@@ -1,6 +1,6 @@
 #import locator
 import deferred
-import graph
+from . import graph
 from deferred._defer import passthru
 
 import traceback
