@@ -6,36 +6,6 @@ from itertools import count
 
 from deferred._defer import passthru,Deferred
 
-# XXX: this is so roundabout
-
-
-def nameOf(node):
-    if hasattr(node,'f_name'):
-        return node.f_name
-    elif hasattr(node,'__name__'):
-        name = node.__name__
-        if name == '<lambda>':
-            co = node.__code__
-            name = '<lambda '+co.co_filename+':'+str(co.co_firstlineno)+'>'
-        return name
-    elif hasattr(node,'f_code'):
-        code = node.f_code
-        label = '{}:{}'.format(code.co_filename,code.co_firstlineno)
-        return label
-    elif isinstance(node,int):
-        return 'stage '+str(node)
-    elif isinstance(node,str):
-        return node
-    elif isinstance(node,tuple):
-        if node[0] is passthru: return
-        return nameOf(node[0])
-    elif isinstance(node,Deferred):
-        return str(node)
-    elif hasattr(node,'name'):
-        return node.name
-    else:
-        raise RuntimeError(node,type(node),dir(node))
-
 def info(type):
     if type == 'errback':
         return '[color="0.0,1.0,1.0",label="errback",w=2.0,len=5]'
@@ -59,32 +29,68 @@ def info(type):
 from functools import total_ordering
 @total_ordering
 class Node:
-    def __init__(self,id,label=None):
+    def __init__(self,id,label=None,comment=None):
         self.id = id
         self.name = str(id)
+        self.comment = comment
         if label is None:
-            label = self.name
+            label = self.labelOf(self.id)
         self.label = label
     def __hash__(self):
-        return hash(self.id)
+        return hash(repr(self.id))
     def __lt__(self,other):
         return self.id < other.id
     def __eq__(self,other):
         return self.id == other.id
     def __repr__(self):
         return repr(self.id)
+    def labelOf(self,what):
+        if hasattr(what,'label'):
+            return what.label
+        elif hasattr(what,'f_name'):
+            return what.f_name
+        elif hasattr(what,'__name__'):
+            name = what.__name__
+            if name == '<lambda>':
+                co = what.__code__
+                name = '<lambda '+co.co_filename+':'+str(co.co_firstlineno)+'>'
+            return name
+        elif hasattr(what,'name'):
+            return what.name
+        elif hasattr(what,'f_code'):
+            code = what.f_code
+            label = '{}:{}'.format(code.co_filename,code.co_firstlineno)
+            return label
+        elif isinstance(what,int):
+            return 'intoderp '+str(what)
+        elif isinstance(what,str):
+            return what
+        elif isinstance(what,tuple):
+            if what[0] is passthru: return
+            return self.labelOf(what[0]) + '+ args'
+        elif hasattr(what,'name'):
+            return what.name
+        else:
+            return str(what)
+            #raise RuntimeError(self,type(node),dir(node))
 
 tab = ' '
 
-def defid(d):
-    return '<Deferred '+hex(id(d))+'>'
-
 colors = {
     'callbacks': 'seagreen1',
-    'deferred': 'palegoldenrod',
+    'deferred': 'yellow',
     'errbacks': 'red',
     'extra': 'mediumpurple',
 }
+
+def colorOf(what):
+    if isinstance(what,Deferred):
+        return colors['deferred']
+    return colors.get(what,'blue')
+
+def toNode(a):
+    if isinstance(a,Node): return a
+    return Node(a)
 
 counter = count(0)
 
@@ -108,39 +114,34 @@ class Graph:
         if self.level:
             self.dest.write(tab*self.level)
         self.dest.write(what)
-    def hashh(self,a):
-        if isinstance(a,Node): return a
-        try:
-            return Node(hash(a),nameOf(a))
-        except TypeError:
-            return Node(id(a),nameOf(a))
     def defers(self,d,first):
-        self.update(defid(d),first,'defers')
-    def nextStage(self,last,current):
+        self.update(d,first,'defers')
+    def nextStage(self,current,last):
         self.update(last,current,'next')
     def chain(self,d,b):
-        self.update(defid(d),b,'chain')
+        self.update(d,b,'chain')
     def update(self,a,b,type):
         assert a is not None
         assert b is not None
         if a is passthru: return
         if b is passthru: return
-        a = self.hashh(a)
-        b = self.hashh(b)
+        if hasattr(a,'__getitem__') and a[0] is passthru: return
+        if hasattr(b,'__getitem__') and b[0] is passthru: return
+        a = toNode(a)
+        b = toNode(b)
         if not a.label or not b.label: return
-        if (a,b,type) in self.relationships: return
         self.root.relationships.add((a,b,type))
-        if self.root is not self:
-            self.nodes.add(a)
-            self.nodes.add(b)
+        self.nodes.add(a)
+        self.nodes.add(b)
     def header(self,a):
         self.headers.append(a)
     @contextmanager
-    def subgraph(self,name=''):
-        print('subgraph',self.sub,name)
-        sub = Graph(self,self.root,sub=name)
-        sub.header("color={};\n".format(colors.get(name,'blue')))
-        sub.header("label="+name+";\n")
+    def subgraph(self,titular=''):
+        titular = toNode(titular)
+        sub = Graph(self,self.root,sub=titular)
+        sub.nodes.add(titular)
+        sub.header("color={};\n".format(colorOf(titular.id)))
+        sub.header('label="'+titular.label+'";\n')
         self.subs.append(sub)
         yield sub
     def callback(self,stage,cb):
@@ -157,23 +158,25 @@ class Graph:
             self.root.donedid = set()
         dest = self.dest
         if self.sub:
-            self.write("subgraph cluster{}_{} ".format(self.sub,next(counter))+ '{ \n')
+            self.write("subgraph /* {} */ cluster_{} ".format(self.sub.label,next(counter))+ '{ \n')
         else:
             self.write('digraph {\n')
         self.level += 1
-        for node in self.nodes:
-            if not node in self.root.donedid:
-                self.write('"'+node.name+'" [label="'+node.label+'"]'+'\n')
-                self.root.donedid.add(node)
+
         for sub in self.subs:
-            print(self.level)
             sub.level = self.level
             sub.finish()
+        for node in self.nodes:
+            if not node in self.root.donedid:
+                self.write('"'+repr(node)+'" [label="'+node.label+'"]')
+                if node.comment:
+                    self.write('/* '+node.comment.replace('/*','..').replace('*/','..')+' */')
+                self.write('\n')
+                self.root.donedid.add(node)
         for header in self.headers:
             self.write(header)
         for a,b,type in self.relationships:
             self.write('"{}" -> "{}" {}\n'.format(a,b,info(type)))
-        print('-')
         self.level -= 1
         self.write('}\n')
 
