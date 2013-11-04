@@ -1,5 +1,5 @@
 #import locator
-from graph import Node,graph
+from .graph import Node,graph
 import deferred
 from deferred._defer import passthru
 
